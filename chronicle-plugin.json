@@ -1,0 +1,8 @@
+{
+  "id": "chronicle.proofreader",
+  "name": "Proofreader",
+  "description": "A guided revision pass: spelling, grammar and an observation-only AI clarity check.",
+  "version": "1.0.0",
+  "entry": "src/index.tsx",
+  "minAppVersion": "0.1.0"
+}
