@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { motion, AnimatePresence } from 'motion/react';
 import {
   ArrowLeft, ChevronLeft, ChevronRight, SpellCheck, BookMarked, List as ListIcon,
-  Sparkles, Loader2, CheckCircle2, X, Trash2, Plus, Check,
+  Sparkles, Loader2, CheckCircle2, X, Trash2, Plus, Check, EyeOff, Undo2, Pencil, RotateCw,
 } from 'lucide-react';
 import { EditorContent } from '@tiptap/react';
 import { cn } from '../lib/utils';
@@ -14,6 +14,8 @@ import { getAiMarks } from '../lib/AiGrammarMarks';
 import { locateQuote } from '../lib/proseMirrorText';
 import { aiClarityPass } from '../lib/clarity';
 import { addWord, getDictionary, listWords, removeWord } from '../lib/dictionary';
+import { getChecks, type CheckKey } from '../lib/prefs';
+import { issueKey, parseIssueKey, resumeTarget, sourceFor, type IssueSource } from '../lib/walk';
 
 interface ProofreadViewProps {
   ctx: PluginContext;
@@ -28,24 +30,6 @@ interface ProofreadViewProps {
   onDismissNotice: () => void;
   onUpdateChapter: (chapterId: string, content: string) => void;
   onExit: () => void;
-}
-
-type IssueSource = 'spelling' | 'grammar' | 'wordchoice' | 'clarity';
-
-/**
- * LanguageTool's `kind` → the bucket the walk shows it in.
- *
- * `confusion` (quiet/quite, their/there) is deliberately NOT spelling: the word
- * is spelled correctly, so telling the author otherwise is wrong, and offering
- * "add to dictionary" would whitelist a common word and silence the rule for
- * good. It still carries LT's replacement as a one-click fix — the author just
- * gets it labelled as the word-choice suggestion it is, and can Ignore it when
- * the diction was deliberate.
- */
-function sourceFor(kind: string): IssueSource {
-  if (kind === 'misspelling') return 'spelling';
-  if (kind === 'confusion') return 'wordchoice';
-  return 'grammar';
 }
 
 interface Issue {
@@ -63,6 +47,9 @@ interface Issue {
 
 /** Shape of this plugin's per-manuscript persisted state. */
 interface ProofreadManuscriptState {
+  /** Issues the writer chose to IGNORE, per chapter. Restorable — see the
+   *  Ignored drawer. Issues merely fixed are not kept here: they're gone from
+   *  the text, so remembering them would be clutter you can never act on. */
   dismissedByChapter?: Record<string, string[]>;
 }
 
@@ -113,6 +100,10 @@ export function ProofreadView({
   const [showDictionary, setShowDictionary] = useState(false);
   // Bumped whenever the dictionary changes so the open chapter re-lints.
   const [dictVersion, setDictVersion] = useState(0);
+  // Which checks are switched on, from Settings → Plugins → Proofreader. Read
+  // once on entry: the settings panel lives on another screen, so it cannot
+  // change while this full-page view is open.
+  const [checks] = useState(() => getChecks(ctx));
 
   // The walk only covers the chosen chapters, in manuscript order.
   const activeChapters = useMemo(
@@ -274,6 +265,7 @@ export function ProofreadView({
           isDarkMode={isDarkMode}
           aiAvailable={aiAvailable}
           showList={showList}
+          checks={checks}
           dictVersion={dictVersion}
           onDictionaryAdd={(word) => {
             addWord(ctx.services, word);
@@ -415,6 +407,8 @@ interface ProofreadChapterProps {
   isDarkMode: boolean;
   aiAvailable: boolean;
   showList: boolean;
+  /** Which check types the writer wants (Settings → Plugins → Proofreader). */
+  checks: Record<CheckKey, boolean>;
   dictVersion: number;
   onDictionaryAdd: (word: string) => void;
   onUpdateContent: (html: string) => void;
@@ -429,6 +423,7 @@ function ProofreadChapter({
   isDarkMode,
   aiAvailable,
   showList,
+  checks,
   dictVersion,
   onDictionaryAdd,
   onUpdateContent,
@@ -440,13 +435,18 @@ function ProofreadChapter({
   const [clarityRan, setClarityRan] = useState(false);
   const [clarityLoading, setClarityLoading] = useState(false);
   const [clarityError, setClarityError] = useState<string | null>(null);
-  // Dismissals survive closing the view: stored in the plugin's per-manuscript
-  // state, keyed by chapter. (Also collects keys of fixed issues — harmless,
-  // their flagged text no longer exists.)
-  const [dismissed, setDismissed] = useState<Set<string>>(() => {
+  // IGNORED — "I meant that": survives closing the view (per-manuscript state,
+  // keyed by chapter) and is reversible from the Ignored drawer.
+  const [ignored, setIgnored] = useState<Set<string>>(() => {
     const stored = (ctx.state.getForManuscript() as ProofreadManuscriptState).dismissedByChapter;
     return new Set(stored?.[chapter.id] ?? []);
   });
+  // FIXED — applied a suggestion, or added the word to the dictionary. Dropped
+  // from the queue at once so the walk advances immediately instead of waiting
+  // for the debounced re-lint to notice. Deliberately NOT persisted: the text
+  // no longer says that, so there is nothing to remember or restore.
+  const [fixed, setFixed] = useState<Set<string>>(() => new Set());
+  const [showIgnored, setShowIgnored] = useState(false);
   const [currentKey, setCurrentKey] = useState<string | null>(null);
   // Issues the user actively dealt with (fix applied, ignored, added to
   // dictionary) — resolution is progress, and the UI should say so.
@@ -457,6 +457,17 @@ function ProofreadChapter({
   const [relinting, setRelinting] = useState(false);
   // Popup anchor: offset from the top of the prose wrapper, in px.
   const [popupTop, setPopupTop] = useState<number | null>(null);
+
+  // HAND-EDITING. The writer clicked into the prose and started typing, so the
+  // walk stands down: no jumping the popup to a different issue under their
+  // cursor, no scrolling away from the sentence they're rewriting. The card is
+  // replaced by a resume bar (Recheck / Continue). Set only for edits WE didn't
+  // make — applying a suggestion still advances the walk as before.
+  const [editing, setEditing] = useState(false);
+  const programmaticEdit = useRef(false);
+  // A resume is pending until the next lint lands, so "Continue" moves to what
+  // the checker says NOW, not to a stale queue.
+  const [resumeFrom, setResumeFrom] = useState<number | null>(null);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
@@ -482,6 +493,9 @@ function ProofreadChapter({
       // The Grammar extension re-lints on a debounce after any doc change;
       // reflect that in the UI so a fix visibly "rechecks".
       setRelinting(true);
+      // A change we didn't make means the writer is editing by hand: pause the
+      // walk rather than yanking the popup to whatever issue lands next.
+      if (!programmaticEdit.current) setEditing(true);
     },
   });
 
@@ -495,9 +509,6 @@ function ProofreadChapter({
     editor.commands.forceRelint();
   }, [dictVersion, editor]);
 
-  const issueKey = (source: IssueSource, text: string, message: string) =>
-    `${source}|${text}|${message}`;
-
   // The walk queue: grammar marks (split spelling vs grammar) + clarity rows,
   // in document order, minus dismissals. Clarity positions come from the
   // AiGrammar decorations, which remap through every edit — one cheap read,
@@ -506,8 +517,10 @@ function ProofreadChapter({
     const rows: Issue[] = [];
     for (const m of grammarMarks) {
       const source = sourceFor(m.kind);
+      // Switched off in Settings → not an issue at all, here or in the list.
+      if (source !== 'clarity' && !checks[source]) continue;
       const key = issueKey(source, m.text, m.message);
-      if (dismissed.has(key)) continue;
+      if (ignored.has(key) || fixed.has(key)) continue;
       rows.push({ key, source, from: m.from, to: m.to, text: m.text, message: m.message, replacements: m.replacements });
     }
     const markById = new Map(
@@ -517,21 +530,37 @@ function ProofreadChapter({
     );
     for (const c of clarityIssues) {
       const key = issueKey('clarity', c.quote, c.message);
-      if (dismissed.has(key)) continue;
+      if (ignored.has(key) || fixed.has(key)) continue;
       const loc = markById.get(c.id) ?? null;
       rows.push({ key, source: 'clarity', from: loc?.from ?? null, to: loc?.to ?? null, text: c.quote, message: c.message, clarityId: c.id });
     }
     rows.sort((a, b) => (a.from ?? Number.MAX_SAFE_INTEGER) - (b.from ?? Number.MAX_SAFE_INTEGER));
     return rows;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [grammarMarks, clarityIssues, dismissed]);
+  }, [grammarMarks, clarityIssues, ignored, fixed, checks]);
+
+  /**
+   * Every key the checkers currently flag, ignored or not — lets the Ignored
+   * drawer say whether restoring a row would actually bring anything back
+   * (the passage may have been rewritten since).
+   */
+  const flaggedKeys = useMemo(() => {
+    const keys = new Set<string>();
+    for (const m of grammarMarks) keys.add(issueKey(sourceFor(m.kind), m.text, m.message));
+    for (const c of clarityIssues) keys.add(issueKey('clarity', c.quote, c.message));
+    return keys;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [grammarMarks, clarityIssues]);
 
   const currentIndex = Math.max(0, queue.findIndex((r) => r.key === currentKey));
   const current = queue[currentIndex] ?? null;
 
   // Keep a valid current selection as the queue shifts under us (fixes,
-  // dismissals, re-lints after edits).
+  // dismissals, re-lints after edits). Frozen while hand-editing: re-pointing
+  // the walk at queue[0] mid-sentence is exactly the teleporting popup this
+  // pause exists to prevent — Continue re-points it deliberately instead.
   useEffect(() => {
+    if (editing) return;
     if (queue.length === 0) {
       if (currentKey !== null) setCurrentKey(null);
       return;
@@ -539,7 +568,7 @@ function ProofreadChapter({
     if (!queue.some((r) => r.key === currentKey)) {
       setCurrentKey(queue[0].key);
     }
-  }, [queue, currentKey]);
+  }, [queue, currentKey, editing]);
 
   /** Resolve the doc span for an issue (clarity reads its remapped mark). */
   const spanFor = useCallback((issue: Issue): { from: number; to: number } | null => {
@@ -584,6 +613,10 @@ function ProofreadChapter({
   }, [editor, spanFor]);
 
   const jumpTo = useCallback((issue: Issue) => {
+    // Steering the walk deliberately — a list row, an arrow key, the next issue
+    // after a fix — IS resuming it. Without this, jumping while paused would
+    // highlight the passage but leave its card hidden behind the resume bar.
+    setEditing(false);
     setCurrentKey(issue.key);
     anchorTo(issue, true);
   }, [anchorTo]);
@@ -595,8 +628,11 @@ function ProofreadChapter({
 
   // Re-anchor (without scrolling) whenever the current issue or its position
   // changes — e.g. after a re-lint shifted spans, on first lint, or when the
-  // queue advanced because the current row was fixed/dismissed.
+  // queue advanced because the current row was fixed/dismissed. Paused while
+  // hand-editing: the resume bar replaces the card, and nothing moves under
+  // the writer's cursor.
   useEffect(() => {
+    if (editing) return;
     if (!current) {
       setPopupTop(null);
       if (editor && !editor.isDestroyed) editor.commands.clearProofreadHighlight();
@@ -606,7 +642,44 @@ function ProofreadChapter({
     const raf = requestAnimationFrame(() => anchorTo(current, false));
     return () => cancelAnimationFrame(raf);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [current?.key, current?.from, current?.to, linted]);
+  }, [current?.key, current?.from, current?.to, linted, editing]);
+
+  /**
+   * Leave hand-editing.
+   *
+   *   Recheck  — re-run the checker and stay where you are, so you can see
+   *              whether what you just wrote cleared the flag (or introduced
+   *              something new) without being moved off the passage.
+   *   Continue — re-run the checker AND resume the walk at the next issue
+   *              from the caret, not back at issue 1.
+   *
+   * Both wait for the fresh lint before acting (`resumeFrom`), so Continue
+   * moves to what the checker says NOW rather than to a stale queue.
+   */
+  const recheck = useCallback(() => {
+    if (!editor || editor.isDestroyed) return;
+    setRelinting(true);
+    editor.commands.forceRelint();
+  }, [editor]);
+
+  const continueWalk = useCallback(() => {
+    if (!editor || editor.isDestroyed) return;
+    setResumeFrom(editor.state.selection.from);
+    setEditing(false);
+    setRelinting(true);
+    editor.commands.forceRelint();
+  }, [editor]);
+
+  // The fresh lint has landed and a Continue is pending: pick up the walk at
+  // the first issue at or after the caret (wrapping to the nearest one before
+  // it, so a fix at the end of a chapter doesn't dead-end the pass).
+  useEffect(() => {
+    if (resumeFrom === null || relinting) return;
+    const target = resumeTarget(queue, resumeFrom);
+    setResumeFrom(null);
+    if (target) jumpTo(target);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [resumeFrom, relinting, queue]);
 
   // First issue after the initial lint: scroll to it so the walk visibly starts.
   const firstAnchorDone = useRef(false);
@@ -642,18 +715,31 @@ function ProofreadChapter({
    * forward from the resolved position, then backward) — resolving should
    * feel like pressing Next, not like starting over at issue 1.
    */
-  const resolve = useCallback((keys: Set<string>) => {
-    setResolvedCount((c) => c + keys.size);
-    const nextDismissed = new Set(dismissed);
-    keys.forEach((k) => nextDismissed.add(k));
-    setDismissed(nextDismissed);
-    // Persist under the whole-plugin manuscript state — spread so other keys
-    // this plugin may store per manuscript survive the merge-free replace.
+  /** Write the ignore list for this chapter back to per-manuscript state. */
+  const persistIgnored = useCallback((next: Set<string>) => {
+    // setForManuscript REPLACES the blob — spread so anything else this plugin
+    // keeps per manuscript survives.
     const state = ctx.state.getForManuscript() as ProofreadManuscriptState;
     ctx.state.setForManuscript({
       ...state,
-      dismissedByChapter: { ...state.dismissedByChapter, [chapter.id]: [...nextDismissed] },
+      dismissedByChapter: { ...state.dismissedByChapter, [chapter.id]: [...next] },
     });
+  }, [ctx, chapter.id]);
+
+  const resolve = useCallback((keys: Set<string>, reason: 'ignored' | 'fixed') => {
+    setResolvedCount((c) => c + keys.size);
+    if (reason === 'ignored') {
+      const next = new Set(ignored);
+      keys.forEach((k) => next.add(k));
+      setIgnored(next);
+      persistIgnored(next);
+    } else {
+      setFixed((prev) => {
+        const next = new Set(prev);
+        keys.forEach((k) => next.add(k));
+        return next;
+      });
+    }
     const fromIndex = queue.findIndex((r) => r.key === currentKey);
     const following = queue.find((r, i) => i > fromIndex && !keys.has(r.key));
     const preceding = [...queue].reverse().find((r) => queue.indexOf(r) < fromIndex && !keys.has(r.key));
@@ -663,20 +749,34 @@ function ProofreadChapter({
     } else {
       setCurrentKey(null);
     }
-  }, [queue, currentKey, jumpTo, dismissed, ctx, chapter.id]);
+  }, [queue, currentKey, jumpTo, ignored, persistIgnored]);
 
-  const dismiss = (issue: Issue) => resolve(new Set([issue.key]));
+  const dismiss = (issue: Issue) => resolve(new Set([issue.key]), 'ignored');
+
+  /** Un-ignore: the row comes straight back if the checker still flags it. */
+  const restoreIgnored = useCallback((keys: string[]) => {
+    const next = new Set(ignored);
+    keys.forEach((k) => next.delete(k));
+    setIgnored(next);
+    persistIgnored(next);
+    // It was counted as progress when ignored; giving it back un-counts it.
+    setResolvedCount((c) => Math.max(0, c - keys.length));
+  }, [ignored, persistIgnored]);
 
   const applyReplacement = (issue: Issue, replacement: string) => {
     if (!editor || editor.isDestroyed) return;
     const span = spanFor(issue);
     if (!span) return;
+    // Our own edit: don't let onUpdate mistake it for the writer typing and
+    // pause the walk — accepting a suggestion should carry straight on.
+    programmaticEdit.current = true;
     // No .focus(): the chip click applies the fix without popping the
     // on-screen keyboard on touch devices.
     editor.chain().setTextSelection(span).insertContent(replacement).run();
+    programmaticEdit.current = false;
     // The doc change re-lints automatically (debounced); resolve the row now
     // so the walk moves on immediately instead of waiting for the recompute.
-    resolve(new Set([issue.key]));
+    resolve(new Set([issue.key]), 'fixed');
   };
 
   const addToDictionary = (issue: Issue) => {
@@ -690,7 +790,7 @@ function ProofreadChapter({
         .filter((r) => r.source === 'spelling' && r.text.trim().toLowerCase() === word.toLowerCase())
         .map((r) => r.key),
     );
-    resolve(keys);
+    resolve(keys, 'fixed');
   };
 
   const runClarity = async () => {
@@ -750,6 +850,19 @@ function ProofreadChapter({
               <Loader2 className="w-3 h-3 animate-spin" /> Rechecking
             </span>
           )}
+          {/* An ignore is not a life sentence: everything you waved off in this
+              chapter is one click away from coming back. */}
+          {ignored.size > 0 && (
+            <button
+              onClick={() => setShowIgnored(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[9px] uppercase font-black tracking-widest opacity-50 hover:opacity-100 hover:bg-black/5 dark:hover:bg-white/5 transition-all whitespace-nowrap"
+              title="Review what you ignored in this chapter — and put any of it back"
+            >
+              <EyeOff className="w-3 h-3" />
+              <span className="hidden sm:inline">Ignored</span>
+              <span className="font-mono tabular-nums">{ignored.size}</span>
+            </button>
+          )}
           {aiAvailable && (
             <button
               onClick={runClarity}
@@ -774,9 +887,11 @@ function ProofreadChapter({
             <h2 className="text-lg font-literata font-semibold opacity-60 mb-6">{chapterLabel}</h2>
             <EditorContent editor={editor} />
 
-            {/* The issue popup, floating right under the flagged line. */}
+            {/* The issue popup, floating right under the flagged line. Hidden
+                while hand-editing — the resume bar takes over, and the card
+                would otherwise sit on top of the sentence being rewritten. */}
             <AnimatePresence>
-              {current && popupTop != null && (
+              {current && popupTop != null && !editing && (
                 <motion.div
                   key={current.key}
                   initial={{ opacity: 0, y: 6, scale: 0.98 }}
@@ -798,9 +913,12 @@ function ProofreadChapter({
                   <p className="text-[11px] leading-relaxed opacity-70 mb-2.5">{current.message}</p>
 
                   <div className="flex items-center gap-1.5 flex-wrap">
-                    {/* One-click fixes: LT's dictionary corrections for a
-                        misspelling, or the confused-with word ("quite"). */}
-                    {(current.source === 'spelling' || current.source === 'wordchoice') &&
+                    {/* One-click fixes, wherever LanguageTool has one: spelling
+                        corrections, the confused-with word ("quite"), and
+                        grammar/punctuation rewrites of the flagged span ("a
+                        apple" → "an apple"). Clarity never offers one by
+                        design — the AI observes, it does not rewrite you. */}
+                    {current.source !== 'clarity' &&
                       (current.replacements ?? []).map((r) => (
                       <button
                         key={r}
@@ -862,6 +980,59 @@ function ProofreadChapter({
               )}
             </AnimatePresence>
 
+            {/* Hand-editing: the walk is paused. This bar sticks to the bottom
+                of the pane (it cannot scroll away like the anchored card can)
+                and says what the checker thinks of the text as you rewrite it.
+                Recheck stays put so you can see your fix land; Continue picks
+                the walk back up at the next issue AFTER the caret, rather than
+                dumping you back at issue 1 somewhere above. */}
+            <AnimatePresence>
+              {editing && (
+                <motion.div
+                  initial={{ opacity: 0, y: 8 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: 8 }}
+                  className="sticky bottom-6 z-30 flex justify-center pt-8"
+                >
+                  <div className={cn(
+                    'flex items-center gap-3 px-4 py-3 rounded-2xl border shadow-xl',
+                    isDarkMode ? 'bg-[#2b2926] border-white/10' : 'bg-white border-black/10',
+                  )}>
+                    <Pencil className="w-4 h-4 opacity-40 shrink-0" />
+                    <div className="min-w-0">
+                      <p className="text-xs font-bold">Editing — the walk is paused</p>
+                      <p className="text-[10px] opacity-40 whitespace-nowrap">
+                        {relinting
+                          ? 'Rechecking your change…'
+                          : queue.length === 0
+                            ? (linted ? 'Nothing flagged in this chapter.' : 'Checking…')
+                            : `${queue.length} issue${queue.length === 1 ? '' : 's'} left`}
+                      </p>
+                    </div>
+                    <button
+                      onClick={recheck}
+                      disabled={relinting}
+                      className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-[10px] uppercase font-black tracking-widest border border-black/10 dark:border-white/15 opacity-70 hover:opacity-100 disabled:opacity-30 transition-all"
+                      title="Re-run the checker on your change without moving from this passage"
+                    >
+                      {relinting ? <Loader2 className="w-3 h-3 animate-spin" /> : <RotateCw className="w-3 h-3" />}
+                      Recheck
+                    </button>
+                    <button
+                      onClick={continueWalk}
+                      className={cn(
+                        'flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-[10px] uppercase font-black tracking-widest transition-all whitespace-nowrap',
+                        isDarkMode ? 'bg-white text-black' : 'bg-black text-white',
+                      )}
+                      title="Recheck, then continue proofreading from here"
+                    >
+                      Continue <ChevronRight className="w-3 h-3" />
+                    </button>
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+
             {/* Initial-lint overlay: unmistakable "the checker is working". */}
             {!linted && (
               <div className="absolute inset-0 z-20 flex items-start justify-center pt-24 pointer-events-none">
@@ -877,8 +1048,9 @@ function ProofreadChapter({
               </div>
             )}
 
-            {/* Clean state: floats where the popup would be. */}
-            {linted && queue.length === 0 && (
+            {/* Clean state: floats where the popup would be. (While editing the
+                resume bar occupies that spot and reports the same fact.) */}
+            {linted && queue.length === 0 && !editing && (
               <div className="sticky bottom-6 z-30 flex justify-center pt-8">
                 <div className={cn(
                   'flex items-center gap-3 px-5 py-3.5 rounded-2xl border shadow-xl',
@@ -918,7 +1090,7 @@ function ProofreadChapter({
       {/* Optional issue list panel */}
       {showList && (
         <div className="w-72 shrink-0 border-l border-black/5 dark:border-white/5 overflow-y-auto custom-scrollbar p-3 space-y-4">
-          {(['spelling', 'grammar', 'clarity'] as IssueSource[]).map((source) => {
+          {(['spelling', 'grammar', 'wordchoice', 'clarity'] as IssueSource[]).map((source) => {
             const rows = queue.filter((r) => r.source === source);
             if (rows.length === 0 && !(source === 'clarity' && clarityRan)) return null;
             return (
@@ -955,7 +1127,130 @@ function ProofreadChapter({
           )}
         </div>
       )}
+
+      <IgnoredDrawer
+        isOpen={showIgnored}
+        onClose={() => setShowIgnored(false)}
+        isDarkMode={isDarkMode}
+        ignored={ignored}
+        flaggedKeys={flaggedKeys}
+        onRestore={restoreIgnored}
+      />
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Ignored drawer — the undo for "Ignore".
+//
+// Ignoring is the right move for deliberate diction (an archaic "quiet", a
+// character who says "ain't"), but it is one click away from being the wrong
+// move, and until now it was permanent. Everything ignored in this chapter is
+// listed here and can be put back. Rows the checker no longer flags — the
+// passage was rewritten since — are marked as such, so restoring nothing looks
+// like nothing rather than like a bug.
+// ---------------------------------------------------------------------------
+
+interface IgnoredDrawerProps {
+  isOpen: boolean;
+  onClose: () => void;
+  isDarkMode: boolean;
+  ignored: Set<string>;
+  flaggedKeys: Set<string>;
+  onRestore: (keys: string[]) => void;
+}
+
+function IgnoredDrawer({ isOpen, onClose, isDarkMode, ignored, flaggedKeys, onRestore }: IgnoredDrawerProps) {
+  const rows = [...ignored]
+    .map((key) => ({ key, parsed: parseIssueKey(key), stillFlagged: flaggedKeys.has(key) }))
+    .filter((r): r is { key: string; parsed: NonNullable<ReturnType<typeof parseIssueKey>>; stillFlagged: boolean } =>
+      r.parsed !== null,
+    );
+
+  return (
+    <AnimatePresence>
+      {isOpen && (
+        <>
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onClick={onClose}
+            className="fixed inset-0 bg-black/40 backdrop-blur-md z-[110]"
+          />
+          <motion.div
+            initial={{ x: '100%' }}
+            animate={{ x: 0 }}
+            exit={{ x: '100%' }}
+            transition={{ type: 'spring', damping: 26, stiffness: 260 }}
+            className={cn(
+              'fixed inset-y-0 right-0 w-full sm:w-[380px] z-[111] shadow-2xl flex flex-col p-6 sm:p-8',
+              isDarkMode ? 'bg-manuscript-dark text-[#F1EDE4]' : 'bg-manuscript-light text-black',
+            )}
+          >
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center gap-2">
+                <EyeOff className="w-4 h-4 opacity-40" />
+                <h3 className="text-sm font-bold uppercase tracking-widest">Ignored</h3>
+                <span className="text-[10px] font-mono opacity-30 tabular-nums">{rows.length}</span>
+              </div>
+              <button onClick={onClose} className="p-2 rounded-xl hover:bg-black/5 dark:hover:bg-white/5 transition-colors">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <p className="text-[10px] leading-relaxed opacity-40 mb-5">
+              Issues you waved off in this chapter. Restore any of them and they
+              rejoin the walk — provided the passage still reads the way it did.
+              To silence a whole class of check for good, use Settings → Plugins →
+              Proofreader instead.
+            </p>
+
+            {rows.length > 0 && (
+              <button
+                onClick={() => onRestore(rows.map((r) => r.key))}
+                className="self-start mb-3 flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[9px] uppercase font-black tracking-widest border border-black/10 dark:border-white/15 opacity-60 hover:opacity-100 transition-all"
+              >
+                <Undo2 className="w-3 h-3" /> Restore all
+              </button>
+            )}
+
+            <div className="flex-1 overflow-y-auto custom-scrollbar space-y-1.5">
+              {rows.map(({ key, parsed, stillFlagged }) => (
+                <div
+                  key={key}
+                  className="flex items-start gap-2 px-3 py-2.5 rounded-xl bg-black/[0.03] dark:bg-white/[0.05]"
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-1.5 mb-0.5">
+                      <span className={cn('px-1.5 py-0.5 rounded text-[8px] uppercase font-black tracking-widest', SOURCE_META[parsed.source].badge)}>
+                        {SOURCE_META[parsed.source].label}
+                      </span>
+                      <span className="text-[11px] font-mono font-bold truncate">“{parsed.text}”</span>
+                    </div>
+                    <p className="text-[10px] leading-relaxed opacity-50">{parsed.message}</p>
+                    {!stillFlagged && (
+                      <p className="text-[9px] italic opacity-30 mt-0.5">
+                        No longer flagged — the passage changed since you ignored it.
+                      </p>
+                    )}
+                  </div>
+                  <button
+                    onClick={() => onRestore([key])}
+                    className="shrink-0 flex items-center gap-1 px-2 py-1.5 rounded-lg text-[9px] uppercase font-black tracking-widest opacity-50 hover:opacity-100 hover:bg-black/5 dark:hover:bg-white/10 transition-all"
+                    title="Put this issue back in the walk"
+                  >
+                    <Undo2 className="w-3 h-3" /> Restore
+                  </button>
+                </div>
+              ))}
+              {rows.length === 0 && (
+                <p className="text-[11px] italic opacity-30">Nothing ignored in this chapter.</p>
+              )}
+            </div>
+          </motion.div>
+        </>
+      )}
+    </AnimatePresence>
   );
 }
 

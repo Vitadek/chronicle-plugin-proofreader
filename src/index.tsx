@@ -2,7 +2,9 @@ import React, { useEffect, useRef, useState } from 'react';
 import { SpellCheck, Loader2 } from 'lucide-react';
 import { definePlugin, PLUGIN_API_VERSION, type PluginContext } from '@chronicle/plugin-api';
 import { ProofreadView } from './components/ProofreadView';
+import { ProofreadSettings } from './components/ProofreadSettings';
 import { authFetch } from './lib/api';
+import { DEFAULT_CHECKS } from './lib/prefs';
 import type { Chapter, ManuscriptMetadata, SaveStatus } from './lib/types';
 
 /**
@@ -254,7 +256,16 @@ export default definePlugin({
   name: 'Proofreader',
   description: 'A guided revision pass: spelling, grammar, and an observation-only AI clarity check.',
 
+  // Which checks the walk runs. Global (follows the writer across books and
+  // devices), unlike the per-chapter ignore list — see lib/prefs.ts.
+  defaultState: { checks: DEFAULT_CHECKS },
+
   contributes: {
+    // Settings → Plugins → Proofreader: switch whole classes of check off.
+    // Ignoring ONE passage stays in the walk (and is reversible from the
+    // Ignored drawer); this is for "never show me word-choice hits at all".
+    settingsPanel: ProofreadSettings,
+
     libraryActions: [
       {
         id: 'proofread',
