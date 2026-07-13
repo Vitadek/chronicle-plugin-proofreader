@@ -10,6 +10,7 @@ import { Chapter, ManuscriptMetadata, SaveStatus } from '../lib/types';
 import type { PluginContext } from '@chronicle/plugin-api';
 import { useProofreadEditor } from '../lib/useProofreadEditor';
 import type { GrammarMark } from '../lib/Grammar';
+import { getAiMarks } from '../lib/AiGrammarMarks';
 import { locateQuote } from '../lib/proseMirrorText';
 import { aiClarityPass } from '../lib/clarity';
 import { addWord, getDictionary, listWords, removeWord } from '../lib/dictionary';
@@ -34,12 +35,14 @@ type IssueSource = 'spelling' | 'grammar' | 'clarity';
 interface Issue {
   key: string;
   source: IssueSource;
-  /** Doc positions; clarity rows relocate by quote at jump time. */
+  /** Doc positions; clarity rows carry the remapped AiGrammar span. */
   from: number | null;
   to: number | null;
   text: string;
   message: string;
   replacements?: string[];
+  /** Set on clarity rows: the AiGrammar decoration to read positions from. */
+  clarityId?: string;
 }
 
 const SOURCE_META: Record<IssueSource, { label: string; badge: string }> = {
@@ -401,7 +404,7 @@ function ProofreadChapter({
   onNextChapter,
 }: ProofreadChapterProps) {
   const [grammarMarks, setGrammarMarks] = useState<GrammarMark[]>([]);
-  const [clarityIssues, setClarityIssues] = useState<{ quote: string; message: string }[]>([]);
+  const [clarityIssues, setClarityIssues] = useState<{ id: string; quote: string; message: string }[]>([]);
   const [clarityRan, setClarityRan] = useState(false);
   const [clarityLoading, setClarityLoading] = useState(false);
   const [clarityError, setClarityError] = useState<string | null>(null);
@@ -459,8 +462,10 @@ function ProofreadChapter({
   const issueKey = (source: IssueSource, text: string, message: string) =>
     `${source}|${text}|${message}`;
 
-  // The walk queue: grammar marks (split spelling vs grammar) + located
-  // clarity rows, in document order, minus dismissals.
+  // The walk queue: grammar marks (split spelling vs grammar) + clarity rows,
+  // in document order, minus dismissals. Clarity positions come from the
+  // AiGrammar decorations, which remap through every edit — one cheap read,
+  // not a document walk per issue.
   const queue = useMemo<Issue[]>(() => {
     const rows: Issue[] = [];
     for (const m of grammarMarks) {
@@ -469,11 +474,16 @@ function ProofreadChapter({
       if (dismissed.has(key)) continue;
       rows.push({ key, source, from: m.from, to: m.to, text: m.text, message: m.message, replacements: m.replacements });
     }
+    const markById = new Map(
+      (editor && !editor.isDestroyed ? getAiMarks(editor.state) : [])
+        .filter((m) => m.id)
+        .map((m) => [m.id as string, m]),
+    );
     for (const c of clarityIssues) {
       const key = issueKey('clarity', c.quote, c.message);
       if (dismissed.has(key)) continue;
-      const loc = editor && !editor.isDestroyed ? locateQuote(editor, c.quote) : null;
-      rows.push({ key, source: 'clarity', from: loc?.from ?? null, to: loc?.to ?? null, text: c.quote, message: c.message });
+      const loc = markById.get(c.id) ?? null;
+      rows.push({ key, source: 'clarity', from: loc?.from ?? null, to: loc?.to ?? null, text: c.quote, message: c.message, clarityId: c.id });
     }
     rows.sort((a, b) => (a.from ?? Number.MAX_SAFE_INTEGER) - (b.from ?? Number.MAX_SAFE_INTEGER));
     return rows;
@@ -495,10 +505,13 @@ function ProofreadChapter({
     }
   }, [queue, currentKey]);
 
-  /** Resolve the doc span for an issue (clarity relocates by quote). */
+  /** Resolve the doc span for an issue (clarity reads its remapped mark). */
   const spanFor = useCallback((issue: Issue): { from: number; to: number } | null => {
     if (!editor || editor.isDestroyed) return null;
-    if (issue.source === 'clarity') return locateQuote(editor, issue.text);
+    if (issue.source === 'clarity') {
+      const mark = getAiMarks(editor.state).find((m) => m.id === issue.clarityId);
+      return mark ? { from: mark.from, to: mark.to } : null;
+    }
     return issue.from != null && issue.to != null ? { from: issue.from, to: issue.to } : null;
   }, [editor]);
 
@@ -645,15 +658,21 @@ function ProofreadChapter({
     setClarityError(null);
     try {
       const issues = await aiClarityPass(editor.state.doc.textContent);
-      setClarityIssues(issues);
+      const withIds = issues.map((issue, i) => ({ ...issue, id: `clarity-${i}` }));
+      setClarityIssues(withIds);
       setClarityRan(true);
-      // Paint the purple squiggles for whatever we can locate.
-      const marks = issues
-        .map((i) => {
-          const loc = locateQuote(editor, i.quote);
-          return loc ? { from: loc.from, to: loc.to, message: i.message } : null;
-        })
-        .filter((m): m is { from: number; to: number; message: string } => m !== null);
+      // Locate each quote ONCE — the AiGrammar decorations remap positions
+      // through subsequent edits. Issues arrive in document order, so scanning
+      // forward from the previous match keeps duplicate quotes distinct (with
+      // a from-the-top fallback in case the order assumption breaks).
+      const marks: { id: string; from: number; to: number; message: string }[] = [];
+      let cursor = 0;
+      for (const issue of withIds) {
+        const loc = locateQuote(editor, issue.quote, cursor) ?? locateQuote(editor, issue.quote);
+        if (!loc) continue;
+        cursor = loc.to;
+        marks.push({ id: issue.id, from: loc.from, to: loc.to, message: issue.message });
+      }
       editor.commands.setAiMarks(marks);
     } catch (err) {
       setClarityError(err instanceof Error ? err.message : 'Clarity pass failed');

@@ -26,19 +26,22 @@ export function buildPosMap(node: PMNode, paraStart: number): { text: string; po
 }
 
 /**
- * Find the first occurrence of `quote` in the editor document and return its
- * span. Used to map AI-returned exact quotes back to positions (IssuesPane's
- * AI pass, ProofreadView's clarity rows).
+ * Find the first occurrence of `quote` in the editor document — at or after
+ * doc position `minFrom` — and return its span. Used to map AI-returned exact
+ * quotes back to positions (IssuesPane's AI pass, ProofreadView's clarity
+ * rows). Passing the previous match's `to` as `minFrom` disambiguates a quote
+ * that appears more than once, as long as issues arrive in document order.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export function locateQuote(editor: any, quote: string): { from: number; to: number } | null {
+export function locateQuote(editor: any, quote: string, minFrom = 0): { from: number; to: number } | null {
   if (!quote) return null;
   let hit: { from: number; to: number } | null = null;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   editor.state.doc.descendants((node: any, pos: number) => {
     if (hit || !node.isTextblock) return hit ? false : undefined;
     const { text, posAt } = buildPosMap(node, pos + 1);
-    const idx = text.indexOf(quote);
+    let idx = text.indexOf(quote);
+    while (idx >= 0 && posAt[idx] < minFrom) idx = text.indexOf(quote, idx + 1);
     if (idx >= 0) {
       const endIdx = Math.min(idx + quote.length, posAt.length - 1);
       hit = { from: posAt[idx], to: posAt[endIdx] };
