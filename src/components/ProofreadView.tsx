@@ -45,6 +45,11 @@ interface Issue {
   clarityId?: string;
 }
 
+/** Shape of this plugin's per-manuscript persisted state. */
+interface ProofreadManuscriptState {
+  dismissedByChapter?: Record<string, string[]>;
+}
+
 const SOURCE_META: Record<IssueSource, { label: string; badge: string }> = {
   spelling: { label: 'Spelling', badge: 'bg-red-500/15 text-red-500' },
   grammar: { label: 'Grammar', badge: 'bg-amber-500/15 text-amber-600 dark:text-amber-400' },
@@ -408,7 +413,13 @@ function ProofreadChapter({
   const [clarityRan, setClarityRan] = useState(false);
   const [clarityLoading, setClarityLoading] = useState(false);
   const [clarityError, setClarityError] = useState<string | null>(null);
-  const [dismissed, setDismissed] = useState<Set<string>>(() => new Set());
+  // Dismissals survive closing the view: stored in the plugin's per-manuscript
+  // state, keyed by chapter. (Also collects keys of fixed issues — harmless,
+  // their flagged text no longer exists.)
+  const [dismissed, setDismissed] = useState<Set<string>>(() => {
+    const stored = (ctx.state.getForManuscript() as ProofreadManuscriptState).dismissedByChapter;
+    return new Set(stored?.[chapter.id] ?? []);
+  });
   const [currentKey, setCurrentKey] = useState<string | null>(null);
   // Issues the user actively dealt with (fix applied, ignored, added to
   // dictionary) — resolution is progress, and the UI should say so.
@@ -608,10 +619,15 @@ function ProofreadChapter({
    */
   const resolve = useCallback((keys: Set<string>) => {
     setResolvedCount((c) => c + keys.size);
-    setDismissed((prev) => {
-      const next = new Set(prev);
-      keys.forEach((k) => next.add(k));
-      return next;
+    const nextDismissed = new Set(dismissed);
+    keys.forEach((k) => nextDismissed.add(k));
+    setDismissed(nextDismissed);
+    // Persist under the whole-plugin manuscript state — spread so other keys
+    // this plugin may store per manuscript survive the merge-free replace.
+    const state = ctx.state.getForManuscript() as ProofreadManuscriptState;
+    ctx.state.setForManuscript({
+      ...state,
+      dismissedByChapter: { ...state.dismissedByChapter, [chapter.id]: [...nextDismissed] },
     });
     const fromIndex = queue.findIndex((r) => r.key === currentKey);
     const following = queue.find((r, i) => i > fromIndex && !keys.has(r.key));
@@ -622,7 +638,7 @@ function ProofreadChapter({
     } else {
       setCurrentKey(null);
     }
-  }, [queue, currentKey, jumpTo]);
+  }, [queue, currentKey, jumpTo, dismissed, ctx, chapter.id]);
 
   const dismiss = (issue: Issue) => resolve(new Set([issue.key]));
 
