@@ -6,7 +6,7 @@ import {
 } from 'lucide-react';
 import { EditorContent } from '@tiptap/react';
 import { cn } from '../lib/utils';
-import { Chapter, ManuscriptMetadata } from '../lib/types';
+import { Chapter, ManuscriptMetadata, SaveStatus } from '../lib/types';
 import type { PluginContext } from '@chronicle/plugin-api';
 import { useProofreadEditor } from '../lib/useProofreadEditor';
 import type { GrammarMark } from '../lib/Grammar';
@@ -21,6 +21,10 @@ interface ProofreadViewProps {
   isDarkMode: boolean;
   /** AI enabled + configured + not hidden by AI_UI=off. Gates the clarity pass. */
   aiAvailable: boolean;
+  saveStatus: SaveStatus;
+  /** Conflict/save warning to surface in-view (toast is a no-op in core). */
+  saveNotice: string | null;
+  onDismissNotice: () => void;
   onUpdateChapter: (chapterId: string, content: string) => void;
   onExit: () => void;
 }
@@ -69,6 +73,9 @@ export function ProofreadView({
   chapters,
   isDarkMode,
   aiAvailable,
+  saveStatus,
+  saveNotice,
+  onDismissNotice,
   onUpdateChapter,
   onExit,
 }: ProofreadViewProps) {
@@ -121,6 +128,18 @@ export function ProofreadView({
         </div>
 
         <div className="flex items-center gap-1.5 shrink-0">
+          {/* Save lifecycle — the only save feedback there is (no toast UI). */}
+          {saveStatus !== 'idle' && (
+            <span
+              className={cn(
+                'text-[9px] uppercase tracking-widest font-bold whitespace-nowrap mr-2 hidden sm:block',
+                saveStatus === 'error' ? 'text-red-500' : 'opacity-40',
+              )}
+            >
+              {saveStatus === 'saving' ? 'Saving…' : saveStatus === 'saved' ? 'Saved' : 'Save failed'}
+            </span>
+          )}
+
           {/* Chapter stepper (over the SELECTED chapters) */}
           {selectedIds && (
             <div className="flex items-center gap-1 mr-2">
@@ -175,6 +194,30 @@ export function ProofreadView({
           </button>
         </div>
       </div>
+
+      {/* Conflict / save warnings, dismissible. Rendered in-view because
+          ctx.services.toast has no visual sink in the host yet. */}
+      <AnimatePresence>
+        {saveNotice && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: 'auto' }}
+            exit={{ opacity: 0, height: 0 }}
+            className="shrink-0 overflow-hidden"
+          >
+            <div className="flex items-center gap-3 px-4 sm:px-8 py-2.5 bg-amber-500/10 border-b border-amber-500/20 text-amber-700 dark:text-amber-400">
+              <p className="text-[11px] flex-1 min-w-0">{saveNotice}</p>
+              <button
+                onClick={onDismissNotice}
+                className="p-1 rounded-lg hover:bg-black/5 dark:hover:bg-white/10 transition-colors shrink-0"
+                title="Dismiss"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {selectedIds === null ? (
         <ChapterPicker
