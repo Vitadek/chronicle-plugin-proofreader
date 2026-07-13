@@ -53,6 +53,11 @@ declare module '@tiptap/core' {
     grammar: {
       /** Turn the grammar checker on/off and recompute (lazy-loads the engine). */
       setGrammarCheck: (enabled: boolean) => ReturnType;
+      /**
+       * Re-run the lint without a document change — for out-of-band inputs the
+       * checker can't see, like an edit to the custom dictionary.
+       */
+      forceRelint: () => ReturnType;
     };
   }
 }
@@ -149,6 +154,8 @@ export const Grammar = Extension.create<GrammarOptions>({
     return {
       enabled: false,
       marks: [] as GrammarMark[],
+      // Bumped by forceRelint; the plugin view watches it like `enabled`.
+      relintNonce: 0,
     };
   },
 
@@ -158,6 +165,13 @@ export const Grammar = Extension.create<GrammarOptions>({
         (enabled: boolean) =>
         ({ state, dispatch }) => {
           this.storage.enabled = enabled;
+          if (dispatch) dispatch(state.tr);
+          return true;
+        },
+      forceRelint:
+        () =>
+        ({ state, dispatch }) => {
+          this.storage.relintNonce += 1;
           if (dispatch) dispatch(state.tr);
           return true;
         },
@@ -187,12 +201,12 @@ export const Grammar = Extension.create<GrammarOptions>({
         },
         view(view) {
           let prevEnabled = ext.storage.enabled;
+          let prevNonce = ext.storage.relintNonce;
 
           const schedule = () => {
             if (timer) clearTimeout(timer);
             timer = setTimeout(async () => {
               timer = null;
-              if (!ext.storage.enabled) return;
               if (!ext.storage.enabled || view.isDestroyed) return;
               const docBefore = view.state.doc;
               const { decorations, marks } = await compute(view.state, ext.options);
@@ -217,9 +231,11 @@ export const Grammar = Extension.create<GrammarOptions>({
           return {
             update(updatedView, prevState) {
               const enabledChanged = ext.storage.enabled !== prevEnabled;
+              const relintRequested = ext.storage.relintNonce !== prevNonce;
               prevEnabled = ext.storage.enabled;
+              prevNonce = ext.storage.relintNonce;
               if (ext.storage.enabled) {
-                if (enabledChanged || !prevState.doc.eq(updatedView.state.doc)) schedule();
+                if (enabledChanged || relintRequested || !prevState.doc.eq(updatedView.state.doc)) schedule();
               } else if (enabledChanged) {
                 clear();
               }

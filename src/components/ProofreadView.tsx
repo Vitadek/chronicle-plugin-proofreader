@@ -441,9 +441,9 @@ function ProofreadChapter({
     getDictionary: () => getDictionary(ctx.services),
     onGrammarMarks: (marks, reason) => {
       setGrammarMarks(marks);
-      // 'cleared' fires when the checker toggles off (e.g. the dictionary
-      // re-lint bounce) — that is NOT a finished lint. Treating it as one
-      // made a fresh chapter flash "clean" until the real result landed.
+      // 'cleared' fires when the checker toggles off — that is NOT a finished
+      // lint. Treating it as one made a fresh chapter flash "clean" until the
+      // real result landed.
       if (reason !== 'cleared') {
         setLinted(true);
         lintedRef.current = true;
@@ -459,15 +459,13 @@ function ProofreadChapter({
   });
 
   // Dictionary changed (add from a card, or edits in the drawer): force a
-  // re-lint so flags appear/disappear accordingly. The Grammar extension only
-  // recomputes on doc change or enable-toggle, so bounce the toggle. Skip
-  // until the first lint has landed — bouncing during the initial check would
-  // clear it for nothing.
+  // re-lint so flags appear/disappear accordingly — the extension can't see
+  // dictionary edits, only document changes. Skip until the first lint has
+  // landed; the initial check already uses the current dictionary.
   useEffect(() => {
     if (dictVersion === 0 || !lintedRef.current || !editor || editor.isDestroyed) return;
     setRelinting(true);
-    editor.commands.setGrammarCheck(false);
-    editor.commands.setGrammarCheck(true);
+    editor.commands.forceRelint();
   }, [dictVersion, editor]);
 
   const issueKey = (source: IssueSource, text: string, message: string) =>
