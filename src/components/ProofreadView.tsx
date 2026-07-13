@@ -30,7 +30,23 @@ interface ProofreadViewProps {
   onExit: () => void;
 }
 
-type IssueSource = 'spelling' | 'grammar' | 'clarity';
+type IssueSource = 'spelling' | 'grammar' | 'wordchoice' | 'clarity';
+
+/**
+ * LanguageTool's `kind` → the bucket the walk shows it in.
+ *
+ * `confusion` (quiet/quite, their/there) is deliberately NOT spelling: the word
+ * is spelled correctly, so telling the author otherwise is wrong, and offering
+ * "add to dictionary" would whitelist a common word and silence the rule for
+ * good. It still carries LT's replacement as a one-click fix — the author just
+ * gets it labelled as the word-choice suggestion it is, and can Ignore it when
+ * the diction was deliberate.
+ */
+function sourceFor(kind: string): IssueSource {
+  if (kind === 'misspelling') return 'spelling';
+  if (kind === 'confusion') return 'wordchoice';
+  return 'grammar';
+}
 
 interface Issue {
   key: string;
@@ -53,6 +69,7 @@ interface ProofreadManuscriptState {
 const SOURCE_META: Record<IssueSource, { label: string; badge: string }> = {
   spelling: { label: 'Spelling', badge: 'bg-red-500/15 text-red-500' },
   grammar: { label: 'Grammar', badge: 'bg-amber-500/15 text-amber-600 dark:text-amber-400' },
+  wordchoice: { label: 'Word choice', badge: 'bg-blue-500/15 text-blue-600 dark:text-blue-400' },
   clarity: { label: 'Clarity', badge: 'bg-purple-500/15 text-purple-500' },
 };
 
@@ -113,8 +130,18 @@ export function ProofreadView({
 
   return (
     <div
+      // DEFINITE height, not just min-height. The host renders this view inside
+      // a `fixed inset-0` box, so `height: 100%` is exactly the viewport — and
+      // a bounded column is what makes the `flex-1 overflow-y-auto` manuscript
+      // pane below an actual scroll container. With min-height alone the column
+      // grew with the chapter instead, so the pane never scrolled: long
+      // chapters ran off the bottom of a fixed parent with no way to reach
+      // them, and the walk's scroll-to-issue was a no-op on an unscrollable
+      // element. (An inline style, because Tailwind can't see plugin JSX and
+      // only classes already in the app's stylesheet exist at runtime.)
+      style={{ height: '100%' }}
       className={cn(
-        'min-h-screen-dvh w-full flex flex-col',
+        'min-h-screen-dvh w-full flex flex-col overflow-hidden',
         isDarkMode ? 'bg-manuscript-dark text-[#F1EDE4]' : 'bg-manuscript-light text-black',
       )}
     >
@@ -478,7 +505,7 @@ function ProofreadChapter({
   const queue = useMemo<Issue[]>(() => {
     const rows: Issue[] = [];
     for (const m of grammarMarks) {
-      const source: IssueSource = m.kind === 'misspelling' ? 'spelling' : 'grammar';
+      const source = sourceFor(m.kind);
       const key = issueKey(source, m.text, m.message);
       if (dismissed.has(key)) continue;
       rows.push({ key, source, from: m.from, to: m.to, text: m.text, message: m.message, replacements: m.replacements });
@@ -771,7 +798,10 @@ function ProofreadChapter({
                   <p className="text-[11px] leading-relaxed opacity-70 mb-2.5">{current.message}</p>
 
                   <div className="flex items-center gap-1.5 flex-wrap">
-                    {current.source === 'spelling' && (current.replacements ?? []).map((r) => (
+                    {/* One-click fixes: LT's dictionary corrections for a
+                        misspelling, or the confused-with word ("quite"). */}
+                    {(current.source === 'spelling' || current.source === 'wordchoice') &&
+                      (current.replacements ?? []).map((r) => (
                       <button
                         key={r}
                         onClick={() => applyReplacement(current, r)}
