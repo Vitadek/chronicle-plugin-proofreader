@@ -2,7 +2,22 @@
   "id": "chronicle.proofreader",
   "name": "Proofreader",
   "description": "A guided revision pass: spelling, grammar and an observation-only AI clarity check.",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "entry": "src/index.tsx",
-  "minAppVersion": "0.1.0"
+  "minAppVersion": "0.1.0",
+  "provides": [
+    "view:proofread"
+  ],
+  "requires": [
+    "host:languagetool"
+  ],
+  "wants": [
+    "host:gemini"
+  ],
+  "conflicts": [
+    "view:proofread"
+  ],
+  "replaces": [
+    "core:proofreader"
+  ]
 }
