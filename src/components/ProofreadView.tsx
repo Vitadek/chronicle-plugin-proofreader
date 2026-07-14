@@ -56,7 +56,7 @@ interface ProofreadManuscriptState {
 const SOURCE_META: Record<IssueSource, { label: string; badge: string }> = {
   spelling: { label: 'Spelling', badge: 'bg-red-500/15 text-red-500' },
   grammar: { label: 'Grammar', badge: 'bg-amber-500/15 text-amber-600 dark:text-amber-400' },
-  wordchoice: { label: 'Word choice', badge: 'bg-blue-500/15 text-blue-600 dark:text-blue-400' },
+  wordchoice: { label: 'Word choice', badge: 'bg-blue-500/10 text-blue-500' },
   clarity: { label: 'Clarity', badge: 'bg-purple-500/15 text-purple-500' },
 };
 
@@ -137,7 +137,7 @@ export function ProofreadView({
       )}
     >
       {/* Header */}
-      <div className="shrink-0 flex items-center justify-between gap-3 px-4 sm:px-8 py-4 border-b border-black/5 dark:border-white/5">
+      <div className="shrink-0 flex items-center justify-between gap-3 px-4 sm:px-8 py-4 border-b border-black/12 dark:border-white/15">
         <div className="flex items-center gap-3 min-w-0">
           <button
             onClick={onExit}
@@ -231,7 +231,7 @@ export function ProofreadView({
             exit={{ opacity: 0, height: 0 }}
             className="shrink-0 overflow-hidden"
           >
-            <div className="flex items-center gap-3 px-4 sm:px-8 py-2.5 bg-amber-500/10 border-b border-amber-500/20 text-amber-700 dark:text-amber-400">
+            <div className="flex items-center gap-3 px-4 sm:px-8 py-2.5 bg-amber-500/10 border-b border-amber-500/20 text-amber-600 dark:text-amber-400">
               <p className="text-[11px] flex-1 min-w-0">{saveNotice}</p>
               <button
                 onClick={onDismissNotice}
@@ -331,7 +331,7 @@ function ChapterPicker({ chapters, draft, onChangeDraft, isDarkMode, onStart }: 
           </p>
         </div>
 
-        <div className="flex items-center justify-between px-6 py-2 border-y border-black/5 dark:border-white/5">
+        <div className="flex items-center justify-between px-6 py-2 border-y border-black/12 dark:border-white/15">
           <span className="text-[10px] uppercase tracking-widest font-bold opacity-40">
             {draft.size} of {chapters.length} selected
           </span>
@@ -374,7 +374,7 @@ function ChapterPicker({ chapters, draft, onChangeDraft, isDarkMode, onStart }: 
           })}
         </div>
 
-        <div className="px-6 py-4 border-t border-black/5 dark:border-white/5">
+        <div className="px-6 py-4 border-t border-black/12 dark:border-white/15">
           <button
             onClick={onStart}
             disabled={draft.size === 0}
@@ -1089,7 +1089,7 @@ function ProofreadChapter({
 
       {/* Optional issue list panel */}
       {showList && (
-        <div className="w-72 shrink-0 border-l border-black/5 dark:border-white/5 overflow-y-auto custom-scrollbar p-3 space-y-4">
+        <div className="w-72 shrink-0 border-l border-black/12 dark:border-white/15 overflow-y-auto custom-scrollbar p-3 space-y-4">
           {(['spelling', 'grammar', 'wordchoice', 'clarity'] as IssueSource[]).map((source) => {
             const rows = queue.filter((r) => r.source === source);
             if (rows.length === 0 && !(source === 'clarity' && clarityRan)) return null;
@@ -1198,7 +1198,7 @@ function IgnoredDrawer({ isOpen, onClose, isDarkMode, ignored, flaggedKeys, onRe
                 <X className="w-4 h-4" />
               </button>
             </div>
-            <p className="text-[10px] leading-relaxed opacity-40 mb-5">
+            <p className="text-[10px] leading-relaxed opacity-40 mb-4">
               Issues you waved off in this chapter. Restore any of them and they
               rejoin the walk — provided the passage still reads the way it did.
               To silence a whole class of check for good, use Settings → Plugins →
@@ -1221,7 +1221,7 @@ function IgnoredDrawer({ isOpen, onClose, isDarkMode, ignored, flaggedKeys, onRe
                   className="flex items-start gap-2 px-3 py-2.5 rounded-xl bg-black/[0.03] dark:bg-white/[0.05]"
                 >
                   <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-1.5 mb-0.5">
+                    <div className="flex items-center gap-1.5 mb-1">
                       <span className={cn('px-1.5 py-0.5 rounded text-[8px] uppercase font-black tracking-widest', SOURCE_META[parsed.source].badge)}>
                         {SOURCE_META[parsed.source].label}
                       </span>
@@ -1324,7 +1324,7 @@ function DictionaryDrawer({ ctx, isOpen, onClose, isDarkMode, onChanged }: Dicti
                 onKeyDown={(e) => { if (e.key === 'Enter') add(); }}
                 placeholder="Add a word…"
                 className={cn(
-                  'flex-1 px-3 py-2.5 rounded-xl text-xs bg-black/[0.03] dark:bg-white/[0.08] border border-black/5 dark:border-white/5 focus:border-black/10 dark:focus:border-white/20 outline-none transition-all',
+                  'flex-1 px-3 py-2.5 rounded-xl text-xs bg-black/[0.03] dark:bg-white/[0.08] border border-black/12 dark:border-white/15 focus:border-black/10 dark:focus:border-white/20 outline-none transition-all',
                   isDarkMode ? 'text-white' : 'text-black',
                 )}
               />

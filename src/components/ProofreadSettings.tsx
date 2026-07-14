@@ -38,26 +38,51 @@ export const ProofreadSettings: React.FC<PluginContext> = (ctx) => {
           <button
             key={key}
             onClick={() => toggle(key)}
-            className="w-full flex items-start gap-3 text-left p-3 rounded-xl hover:bg-black/[0.03] dark:hover:bg-white/[0.04] transition-colors"
+            className="w-full flex items-start gap-3 text-left p-3 rounded-xl hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
             role="switch"
             aria-checked={checks[key]}
           >
+            {/* Geometry in INLINE STYLES, deliberately.
+                Tailwind never scans plugin source, so a utility class only
+                exists at runtime if the app itself happens to use it. `w-9`
+                doesn't — so this track rendered with height and NO width, and
+                the absolutely-positioned knob landed on top of the label. A
+                plugin cannot safely reach for an arbitrary class; anything
+                load-bearing has to be inline (or verified present in the app's
+                stylesheet). */}
             <span
-              className={cn(
-                'mt-0.5 relative w-9 h-5 rounded-full shrink-0 transition-colors',
-                checks[key] ? 'bg-blue-500' : 'bg-black/15 dark:bg-white/20',
-              )}
+              style={{
+                width: 36,
+                height: 20,
+                position: 'relative',
+                display: 'block',
+                flexShrink: 0,
+                marginTop: 2,
+                borderRadius: 999,
+                // Colours inline too: `bg-black/25` and `bg-white/25` are not in
+                // the app's stylesheet either, so an off toggle would have had
+                // no track at all. Mid-grey reads on both themes without the
+                // plugin needing to know which one is active.
+                backgroundColor: checks[key] ? '#3b82f6' : 'rgba(128,128,128,0.4)',
+                transition: 'background-color 150ms ease',
+              }}
             >
               <span
-                className={cn(
-                  'absolute top-1 w-3 h-3 rounded-full bg-white transition-all',
-                  checks[key] ? 'left-5' : 'left-1',
-                )}
+                style={{
+                  position: 'absolute',
+                  top: 4,
+                  left: checks[key] ? 20 : 4,
+                  width: 12,
+                  height: 12,
+                  borderRadius: 999,
+                  backgroundColor: '#fff',
+                  transition: 'left 150ms ease',
+                }}
               />
             </span>
-            <span className="min-w-0">
+            <span className="min-w-0 flex-1">
               <span className="block text-xs font-bold">{CHECK_META[key].label}</span>
-              <span className="block text-[10px] leading-relaxed opacity-50">{CHECK_META[key].hint}</span>
+              <span className="block text-[10px] leading-relaxed opacity-60">{CHECK_META[key].hint}</span>
             </span>
           </button>
         ))}
