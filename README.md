@@ -37,8 +37,33 @@ spelling, grammar & punctuation, word choice. That's the permanent
 "never show me this" — for a single passage you meant to write that way, use
 **Ignore** in the walk instead.
 
-Requires the LanguageTool sidecar (`host:languagetool`); the clarity pass
-additionally wants `host:gemini` and is simply absent without it.
+## Requirements
+
+| Capability | Hard? | What it's for |
+|---|---|---|
+| `host:languagetool` | **Yes** — refuses to enable without it | The spelling and grammar engine. Everything in the walk except clarity. |
+| `host:gemini` | No — runs *Limited* | The AI clarity pass. Without it the button simply isn't there; the rest works. |
+
+**LanguageTool is a sidecar container, not something you install into
+Chronicle.** It ships in Chronicle's `docker-compose.yml`, so a stock stack
+already has it. If you're running Chronicle some other way, add it and point
+`LANGUAGETOOL_URL` at it:
+
+```yaml
+services:
+  chronicle:
+    environment:
+      - LANGUAGETOOL_URL=http://languagetool:8010   # the default
+  languagetool:
+    image: erikvl87/languagetool:latest
+    environment: [Java_Xms=256m, Java_Xmx=768m]
+```
+
+Chronicle **probes** the sidecar rather than trusting the config, so it counts as
+available only when it actually answers. Install this plugin without it and it
+will install and compile fine, then tell you — at install time and on its card in
+Settings — that it can't be enabled, which URL it tried, and what to set. It is
+never left flagging nothing in silence. Give the JVM ~30s after a cold start.
 
 ## Install
 
